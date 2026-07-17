@@ -1,0 +1,213 @@
+﻿--Doanh thu khách hàng tạo ra
+select 
+		SUM(H.TotalDue) as tongdoanhthu,
+		C.CustomerID as khach
+from Sales.SalesOrderHeader as H
+join Sales.Customer as C
+on H.CustomerID = C.CustomerID
+group by C.CustomerID
+
+--Số lần khách hàng mua đồ
+select 
+		COUNT(H.SalesOrderID) as solanmua,
+		C.CustomerID as khach
+from Sales.SalesOrderHeader as H
+join Sales.Customer as C
+on H.CustomerID = C.CustomerID
+group by C.CustomerID
+
+--Ngày mua hàng cuối cùng của khách (Tính trên toàn bộ dữ liệu)
+select
+	MAX(S.OrderDate) as ngaycuoi
+from Sales.SalesOrderHeader as S
+join Sales.Customer as C
+on S.CustomerID = C.CustomerID
+
+--2014-06-30 (Max(OrderDate) (ngày mua cuối))
+--Ngày phân tích (ngày mua cuối của từng khách + 1) - ngày mua cuối
+--Trong đó:
+--Start: Ngày phân tích (Max(OrderDate) + 1)
+--End: Ngày mua cuối (Max(OrderDate))
+--Mà: Datediff(start, end) ==> Datediff((Max(OrderDate)), (Max(OrderDate) + 1)) Output: end - start
+--==> 2014-06-30 - 2014-06-31
+
+--Ngày gần nhất khách mua hàng đã là bao lâu?
+select
+		DATEDIFF(Day, MAX(OrderDate), '2014-07-01') as recenly,
+		C.CustomerID
+from Sales.SalesOrderHeader as S
+join Sales.Customer as C
+on S.CustomerID = C.CustomerID
+group by C.CustomerID;
+
+--RFM
+with Recency as (select DATEDIFF(Day, MAX(OrderDate), '2014-07-01') as R,
+		C.CustomerID as khach
+from Sales.SalesOrderHeader as S
+join Sales.Customer as C
+on S.CustomerID = C.CustomerID
+group by C.CustomerID),
+Frequency as (select 
+		COUNT(H.SalesOrderID) as F,
+		C.CustomerID as khach
+from Sales.SalesOrderHeader as H
+join Sales.Customer as C
+on H.CustomerID = C.CustomerID
+group by C.CustomerID),
+Mondetary as (select 
+		SUM(H.TotalDue) as M,
+		C.CustomerID as khach
+from Sales.SalesOrderHeader as H
+join Sales.Customer as C
+on H.CustomerID = C.CustomerID
+group by C.CustomerID),
+Score as (
+select 
+		R.khach as S,
+		NTILE(4) Over(Order by R.R ASC) as Rs,
+		NTILE(4) Over(Order by F.F DESC) as Fs,
+		NTILE(4) Over(Order by M.M DESC) as Ms
+from Recency as R
+join Frequency as F
+on R.khach = F.khach
+join Mondetary as M
+on R.khach = M.khach)
+select 
+	  S as khach,
+	  Rs,
+	  Fs,
+	  Ms,
+	  Case
+		 when Rs >=3 and Fs >=3 and Ms >=3 then 'Loyal'
+		 when Rs <=2 and Fs >=3 then 'At Risk'
+		 when Rs <= 2 and Fs <=2 then 'Churn'
+		 when Rs >=3 and Ms <=2 then 'Potential'
+		 Else 'Others'
+	  End as RFM
+INTO #RFM
+from Score
+
+declare @tongkhach DECIMAL (10,2) 
+select @tongkhach = COUNT(*)
+from #RFM
+
+--Nhóm khách hàng trung thành
+select 
+		COUNT(*) as trungthanh
+from #RFM
+where RFM = 'Loyal'
+
+--Phần trăm khách hàng 
+SELECT 
+    RFM,
+    COUNT(*) AS SoKhach,
+    CAST(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER() AS DECIMAL(5,2)) AS PhanTram
+FROM #RFM
+GROUP BY RFM
+ORDER BY SoKhach DESC
+
+--Phần trăm doanh thu của top 20 với tổng doanh thu công ty
+Declare @tongdoanhthu DECIMAL(18,2)
+select @tongdoanhthu = SUM(TotalDue)
+from Sales.SalesOrderHeader
+select top 20
+		R.khach,
+		R.RFM,
+		SUM(S.TotalDue) as tongthu
+from #RFM as R
+join Sales.SalesOrderHeader as S
+on R.khach = S.CustomerID
+group by 
+		R.khach, R.RFM
+order by tongthu DESC;
+with top20 as (select top 20
+		R.khach,
+		R.RFM,
+		SUM(S.TotalDue) as tongthu
+from #RFM as R
+join Sales.SalesOrderHeader as S
+on R.khach = S.CustomerID
+group by 
+		R.khach, R.RFM
+order by tongthu DESC)
+select
+		COUNT(*) as khach,
+		SUM(tongthu) as tongtop20,
+		CAST(SUM(tongthu) * 100.0/@tongdoanhthu as DECIMAL(10,2)) as phantramdoanhthu
+from top20
+where RFM = 'Churn'
+
+--20 khách có tổng doanh thu cao nhất
+select top 20
+		R.khach,
+		R.RFM,
+		SUM(S.TotalDue) as tongthu
+from #RFM as R
+join Sales.SalesOrderHeader as S
+on R.khach = S.CustomerID
+group by 
+		R.khach, R.RFM
+order by tongthu DESC
+
+--Tổng doanh thu của doanh nghiệp
+DECLARE @totalrev DECIMAL (12,2)
+select @totalrev = SUM(TotalDue)
+from Sales.SalesOrderHeader;
+
+with doanhthuloyal as (select
+		SUM(s.TotalDue) as totalrev,
+		SUM(Case
+				when RFM = 'Loyal' then s.TotalDue
+				else 0
+			End) as loyal_revenue
+from #RFM as r
+join sales.SalesOrderHeader as s
+on r.khach = s.CustomerID)
+select
+		loyal_revenue,
+		totalrev,
+		CAST(loyal_revenue * 100/ totalrev as DECIMAL (10,2)) as loyalrev
+from doanhthuloyal
+
+--Tổng doanh thu các nhóm khách hàng
+SELECT
+    r.RFM,
+    SUM(s.TotalDue) AS revenue
+FROM #RFM r
+JOIN sales.SalesOrderHeader s
+    ON r.khach = s.CustomerID
+GROUP BY r.RFM
+ORDER BY revenue DESC;
+
+select *
+from #RFM
+
+-- [Câu 5]: Điểm tần suất trung bình (Fs) của nhóm Loyal so với các nhóm còn lại
+SELECT
+    RFM,
+    CAST(AVG(CAST(Fs AS DECIMAL(10,2))) AS DECIMAL(10,2)) AS diemF_trungbinh
+FROM #RFM
+GROUP BY RFM
+ORDER BY diemF_trungbinh DESC
+
+-- [Câu 6]: Doanh thu trung bình mỗi đơn hàng (AOV) của từng nhóm RFM
+-- Tính tổng doanh thu chia cho tổng số đơn hàng theo từng nhóm, sau đó so sánh
+SELECT
+    r.RFM,
+    COUNT(s.SalesOrderID)               AS tongdon,
+    CAST(SUM(s.TotalDue) AS DECIMAL(18,2))   AS tongdoanhthu,
+    CAST(SUM(s.TotalDue) / COUNT(s.SalesOrderID) AS DECIMAL(10,2)) AS AOV
+FROM #RFM AS r
+JOIN Sales.SalesOrderHeader AS s
+    ON r.khach = s.CustomerID
+GROUP BY r.RFM
+ORDER BY AOV DESC
+
+-- Kiểm tra số lượng khách trong từng nhóm hiện tại
+SELECT RFM, COUNT(*) AS sokhach
+FROM #RFM
+GROUP BY RFM
+ORDER BY sokhach DESC
+
+Drop table if exists #RFM
+
